@@ -133,28 +133,29 @@ def strip_think_blocks(text):
     # Removes anything inside <think>...</think> (including the tags)
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
 
-def chat_with_gpt40(audio, history):
-    MODEL = MODEL_GPT 
-    # 1. Transcribe audio to text
-    with open(audio, "rb") as audio_file:
-        transcript = openai.audio.transcriptions.create(
-            model="whisper-1",
-            file=audio_file
-        )
-    user_text = transcript.text
+def chat_with_gpt40(audio, text, history):
+    MODEL = MODEL_GPT
+    # 1. Get user input from either audio or text
+    user_text = None
+    if audio is not None:
+        with open(audio, "rb") as audio_file:
+            transcript = openai.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file
+            )
+        user_text = transcript.text
+    elif text and text.strip():
+        user_text = text.strip()
+    else:
+        return None, "Please provide a voice or text input.", history if history else [], []
 
-    # 2. Prepare conversation history for GPT (exclude system messages from chat history)
+    # 2. Prepare conversation history for GPT (exclude system messages from chat display)
     messages = []
     if history:
-        # Filter out system messages from history
         for msg in history:
-            if hasattr(msg, "role"):
-                if msg.role != "system":
-                    messages.append(msg)
-            elif isinstance(msg, dict):
-                if msg.get("role") != "system":
-                    messages.append(msg)
-    # Add system message for the current turn
+            role = getattr(msg, "role", None) if hasattr(msg, "role") else msg.get("role")
+            if role != "system":
+                messages.append(msg)
     messages = [{"role": "system", "content": system_message}] + messages
     messages = messages + [{"role": "user", "content": user_text}]
 
@@ -176,7 +177,6 @@ def chat_with_gpt40(audio, history):
 
     gpt_text = chat_response.choices[0].message.content
     print('gpt_text', gpt_text)
-    # Strip <think> blocks from the GPT response
     gpt_text = strip_think_blocks(gpt_text)
     messages.append({"role": "assistant", "content": gpt_text})
 
@@ -186,32 +186,42 @@ def chat_with_gpt40(audio, history):
         input=gpt_text,
         voice="alloy"
     )
-    # Save audio to a temporary file
     out_path = "gpt_response.mp3"
     with open(out_path, "wb") as f:
         f.write(tts_response.content)
 
-    # Prepare chat history for gr.Chatbot (exclude system messages)
+    # Simplified chat history for display: only user/assistant messages, skip system/tool
     chat_pairs = []
-    filtered = []
-    for m in messages:
-        if hasattr(m, "role"):
-            if m.role != "system":
-                filtered.append(m)
-        elif isinstance(m, dict):
-            if m.get("role") != "system":
-                filtered.append(m)
-    for i in range(0, len(filtered)-1, 2):
-        user_msg = filtered[i].content if hasattr(filtered[i], "content") else filtered[i].get("content", "")
-        if hasattr(filtered[i+1], "role"):
-            role = filtered[i+1].role
-            assistant_msg = filtered[i+1].content if role == "assistant" and hasattr(filtered[i+1], "content") else ""
-        else:
-            assistant_msg = filtered[i+1].get("content", "") if filtered[i+1].get("role", "") == "assistant" else ""
-        chat_pairs.append((user_msg, assistant_msg))
-    if len(filtered) % 2 == 1 and (hasattr(filtered[-1], "role") and filtered[-1].role == "user" or isinstance(filtered[-1], dict) and filtered[-1].get("role") == "user"):
-        last_msg = filtered[-1].content if hasattr(filtered[-1], "content") else filtered[-1].get("content", "")
-        chat_pairs.append((last_msg, ""))
+    display_msgs = [
+        m if isinstance(m, dict) else m.__dict__
+        for m in messages
+        if (m.get("role") if isinstance(m, dict) else getattr(m, "role", None)) in ("user", "assistant")
+    ]
+    last_role = None
+    last_content = ""
+    for m in display_msgs:
+        role = m.get("role")
+        content = m.get("content", "")
+        if role == "user":
+            # If previous was also user, append as new turn
+            if last_role == "user":
+                chat_pairs.append((last_content, ""))
+            last_content = content
+            last_role = "user"
+        elif role == "assistant":
+            # If previous was user, pair them
+            if last_role == "user":
+                chat_pairs.append((last_content, content))
+                last_content = ""
+                last_role = None
+            else:
+                # Assistant message without user, show as (None, assistant)
+                chat_pairs.append(("", content))
+                last_content = ""
+                last_role = None
+    # If last message was user and not paired
+    if last_role == "user":
+        chat_pairs.append((last_content, ""))
 
     return out_path, gpt_text, messages, chat_pairs
 
@@ -258,6 +268,7 @@ iface = gr.Interface(
     fn=chat_with_gpt40,
     inputs=[
         gr.Audio(type="filepath", show_label=True, show_download_button=False, interactive=True),
+        gr.Textbox(label="Type your message (or use voice above)", lines=2, interactive=True),
         gr.State([])  # history state
     ],
     outputs=[
@@ -266,8 +277,8 @@ iface = gr.Interface(
         gr.State(),  # updated history
         gr.Chatbot(label="Conversation History")
     ],
-    title="Voice Chat with GPT-4o-mini",
-    description="Speak to GPT-4o-mini and hear its response. Conversation history is shown below."
+    title="Voice/Text Chat with GPT-4o-mini",
+    description="Speak or type to GPT-4o-mini and hear its response. Conversation history is shown below."
 )
 
 if __name__ == "__main__":
